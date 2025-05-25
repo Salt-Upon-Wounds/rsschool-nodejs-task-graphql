@@ -1,7 +1,6 @@
 import {
   GraphQLBoolean,
   GraphQLFloat,
-  GraphQLID,
   GraphQLInputObjectType,
   GraphQLInt,
   GraphQLList,
@@ -10,7 +9,6 @@ import {
   GraphQLSchema,
   GraphQLString,
   GraphQLEnumType,
-  GraphQLScalarType,
 } from 'graphql';
 import { UUIDType } from './uuid.js';
 import { PrismaClient } from '@prisma/client';
@@ -144,21 +142,25 @@ UserType = new GraphQLObjectType({
     userSubscribedTo: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(UserType))),
       resolve: async (user, _args, { prisma }) => {
-        return prisma.user.findMany({
-          where: {
-            userSubscribedTo: { some: { authorId: user.id } },
-          },
+        const subs = await prisma.subscribersOnAuthors.findMany({
+          where: { subscriberId: user.id },
+          select: { authorId: true },
         });
+        const authorIds = subs.map(s => s.authorId);
+        if (!authorIds.length) return [];
+        return prisma.user.findMany({ where: { id: { in: authorIds } } });
       },
     },
     subscribedToUser: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(UserType))),
       resolve: async (user, _args, { prisma }) => {
-        return prisma.user.findMany({
-          where: {
-            subscribedToUser: { some: { subscriberId: user.id } },
-          },
+        const subs = await prisma.subscribersOnAuthors.findMany({
+          where: { authorId: user.id },
+          select: { subscriberId: true },
         });
+        const subscriberIds = subs.map(s => s.subscriberId);
+        if (!subscriberIds.length) return [];
+        return prisma.user.findMany({ where: { id: { in: subscriberIds } } });
       },
     },
   }),
