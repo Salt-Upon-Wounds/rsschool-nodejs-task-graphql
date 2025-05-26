@@ -9,13 +9,26 @@ import {
   GraphQLSchema,
   GraphQLString,
   GraphQLEnumType,
+  GraphQLResolveInfo,
 } from 'graphql';
 import { UUIDType } from './uuid.js';
 import { PrismaClient } from '@prisma/client';
+import { parseResolveInfo } from 'graphql-parse-resolve-info';
 
 import type { User, Profile, Post, MemberType } from '@prisma/client';
+import DataLoader from 'dataloader';
 
-type GqlContext = { prisma: PrismaClient };
+type GqlContext = {
+  prisma: PrismaClient;
+  loaders: {
+    userLoader: DataLoader<string, User | undefined>;
+    profileLoader: DataLoader<string, Profile | null>;
+    postsLoader: DataLoader<string, Post[]>;
+    memberTypeLoader: DataLoader<string, MemberType | null>;
+    userSubscribedToLoader: DataLoader<string, User[]>;
+    subscribedToUserLoader: DataLoader<string, User[]>;
+  };
+};
 type CreateUserArgs = { dto: { name: string; balance: number } };
 type CreateProfileArgs = { dto: { isMale: boolean; yearOfBirth: number; userId: string; memberTypeId: string } };
 type CreatePostArgs = { dto: { title: string; content: string; authorId: string } };
@@ -112,8 +125,8 @@ const ProfileType = new GraphQLObjectType({
     yearOfBirth: { type: new GraphQLNonNull(GraphQLInt) },
     memberType: {
       type: new GraphQLNonNull(MemberTypeType),
-      resolve: async (profile:Profile, _args, { prisma }: GqlContext) => {
-        return prisma.memberType.findUnique({ where: { id: profile.memberTypeId } });
+      resolve: async (profile:Profile, _args, { loaders }: GqlContext) => {
+        return loaders.memberTypeLoader.load(profile.memberTypeId)
       },
     },
   }),
@@ -129,38 +142,32 @@ UserType = new GraphQLObjectType({
     balance: { type: new GraphQLNonNull(GraphQLFloat) },
     profile: {
       type: ProfileType,
-      resolve: async (user: User, _args, { prisma }: GqlContext) => {
-        return prisma.profile.findUnique({ where: { userId: user.id } });
+      resolve: async (user: User, _args, { loaders }: GqlContext) => {
+        return loaders.profileLoader.load(user.id)
       },
     },
     posts: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(PostType))),
-      resolve: async (user, _args, { prisma }) => {
-        return prisma.post.findMany({ where: { authorId: user.id } });
+      resolve: async (user, _args, { loaders }) => {
+        return loaders.postsLoader.load(user.id)
       },
     },
     userSubscribedTo: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(UserType))),
-      resolve: async (user, _args, { prisma }) => {
-        const subs = await prisma.subscribersOnAuthors.findMany({
-          where: { subscriberId: user.id },
-          select: { authorId: true },
-        });
-        const authorIds = subs.map(s => s.authorId);
-        if (!authorIds.length) return [];
-        return prisma.user.findMany({ where: { id: { in: authorIds } } });
+      resolve: async (user: User & { userSubscribedTo?: { authorId: string }[]}, _args, { loaders }, info) => {
+        if (user.userSubscribedTo) {
+          return user.userSubscribedTo.map((sub) => ({ id: sub.authorId }));
+        }
+        return loaders.userSubscribedToLoader.load(user.id);
       },
     },
     subscribedToUser: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(UserType))),
-      resolve: async (user, _args, { prisma }) => {
-        const subs = await prisma.subscribersOnAuthors.findMany({
-          where: { authorId: user.id },
-          select: { subscriberId: true },
-        });
-        const subscriberIds = subs.map(s => s.subscriberId);
-        if (!subscriberIds.length) return [];
-        return prisma.user.findMany({ where: { id: { in: subscriberIds } } });
+      resolve: async (user: User & { subscribedToUser?: { subscriberId: string }[]}, _args, { loaders }, info) => {
+        if (user.subscribedToUser) {
+          return user.subscribedToUser.map((sub) => ({ id: sub.subscriberId }));
+        }
+        return loaders.subscribedToUserLoader.load(user.id);
       },
     },
   }),
@@ -180,7 +187,46 @@ const RootQueryType = new GraphQLObjectType({
     },
     users: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(UserType))),
-      resolve: (_root, _args, { prisma }) => prisma.user.findMany(),
+      resolve: async (_root, _args, { prisma ,loaders }, info: GraphQLResolveInfo) => {
+        const parsedInfo = parseResolveInfo(info);
+        const fields = parsedInfo?.fieldsByTypeName?.User ?? {};
+        const needSubscribedToUser = 'subscribedToUser' in fields;
+        const needUserSubscribedTo = 'userSubscribedTo' in fields;
+
+        // Формируем include только с нужными ключами
+        const include: {
+          subscribedToUser?: boolean;
+          userSubscribedTo?: boolean;
+        } = {};
+        if (needSubscribedToUser) include.subscribedToUser = true;
+        if (needUserSubscribedTo) include.userSubscribedTo = true;
+
+        type Users = (User & {
+          subscribedToUser?: { subscriberId: string }[];
+          userSubscribedTo?: { authorId: string }[];
+        })[]
+
+        const users: Users = Object.keys(include).length > 0
+          ? await prisma.user.findMany({ include })
+          : await prisma.user.findMany();
+
+        users.forEach((user) => {
+          loaders.userLoader.prime(user.id, user);
+
+          if (needUserSubscribedTo && user.userSubscribedTo) {
+            const authorIds = user.userSubscribedTo.map((sub) => sub.authorId);
+            const authors = users.filter((u) => authorIds.includes(u.id));
+            loaders.userSubscribedToLoader.prime(user.id, authors);
+          }
+
+          if (needSubscribedToUser && user.subscribedToUser) {
+            const subscriberIds = user.subscribedToUser.map((sub) => sub.subscriberId);
+            const subscribers = users.filter((u) => subscriberIds.includes(u.id));
+            loaders.subscribedToUserLoader.prime(user.id, subscribers);
+          }
+        });
+        return users;
+      },
     },
     user: {
       type: UserType,

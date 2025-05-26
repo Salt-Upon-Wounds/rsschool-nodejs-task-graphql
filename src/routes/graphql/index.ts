@@ -3,6 +3,7 @@ import { createGqlResponseSchema, gqlResponseSchema } from './schemas.js';
 import { schema } from './types/gqlTypes.js';
 import { graphql, parse, validate } from 'graphql';
 import depthLimit from 'graphql-depth-limit';
+import { createMemberTypeLoader, createPostsLoader, createProfileLoader, createSubscribedToUserLoader, createUserLoader, createUserSubscribedToLoader, } from './types/loaders.js';
 
 const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
   const { prisma } = fastify;
@@ -28,7 +29,17 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
         schema,
         source: req.body.query,
         variableValues: req.body.variables,
-        contextValue: { prisma },
+        contextValue: {
+          prisma,
+          loaders: {
+            userLoader: createUserLoader(prisma),
+            userSubscribedToLoader: createUserSubscribedToLoader(prisma),
+            subscribedToUserLoader: createSubscribedToUserLoader(prisma),
+            profileLoader: createProfileLoader(prisma),
+            postsLoader: createPostsLoader(prisma),
+            memberTypeLoader: createMemberTypeLoader(prisma),
+          },
+         },
       });
     },
   });
