@@ -1,6 +1,9 @@
 import { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox';
 import { createGqlResponseSchema, gqlResponseSchema } from './schemas.js';
-import { graphql } from 'graphql';
+import { schema } from './types/gqlTypes.js';
+import { graphql, parse, validate } from 'graphql';
+import depthLimit from 'graphql-depth-limit';
+import { createMemberTypeLoader, createPostsLoader, createProfileLoader, createSubscribedToUserLoader, createUserLoader, createUserSubscribedToLoader, } from './types/loaders.js';
 
 const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
   const { prisma } = fastify;
@@ -14,8 +17,30 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
         200: gqlResponseSchema,
       },
     },
-    async handler(req) {
-      // return graphql();
+    async handler(req, reply) {
+      const document = parse(req.body.query);
+      const errors = validate(schema, document, [depthLimit(5)]);
+      if (errors.length > 0) {
+        return reply.code(400).send({
+          errors: errors.map((err) => ({ message: err.message })),
+        });
+      }
+      return graphql({
+        schema,
+        source: req.body.query,
+        variableValues: req.body.variables,
+        contextValue: {
+          prisma,
+          loaders: {
+            userLoader: createUserLoader(prisma),
+            userSubscribedToLoader: createUserSubscribedToLoader(prisma),
+            subscribedToUserLoader: createSubscribedToUserLoader(prisma),
+            profileLoader: createProfileLoader(prisma),
+            postsLoader: createPostsLoader(prisma),
+            memberTypeLoader: createMemberTypeLoader(prisma),
+          },
+         },
+      });
     },
   });
 };
